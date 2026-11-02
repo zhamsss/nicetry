@@ -1,0 +1,185 @@
+openapi: 3.0.3
+info:
+  title: FinRisk-Monitor Core API
+  version: 1.0.0
+  description: |
+    API автоматизированной системы риск-менеджмента финансовой устойчивости компании.
+    Предназначено для интеграции с ERP-системами (например, 1С) и банковскими шлюзами
+    с целью потокового сбора транзакций и мониторинга риск-статуса в реальном времени.
+servers:
+  - url: https://finrisk-monitor.local
+    description: Локальный сервер разработки (Development)
+paths:
+  /transactions:
+    post:
+      summary: Прием финансовой транзакции для анализа риска
+      description: |
+        Эндпоинт используется внешними мастер-системами (1С:ERP, Клиент-Банк) для
+        потоковой передачи данных о совершенных или запланированных движениях денежных средств.
+        Каждый запрос запускает контур обработки в Risk Engine для экспресс-оценки ликвидности.
+      operationId: createTransaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionPayload'
+      responses:
+        '202':
+          description: Транзакция успешно принята в очередь на обработку и скоринг риска.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - transaction_id
+                  - status
+                properties:
+                  transaction_id:
+                    type: string
+                    format: uuid
+                    description: Уникальный идентификатор зарегистрированной транзакции.
+                    example: "4a7b9c12-34ef-56gh-78ij-90kl12345678"
+                  status:
+                    type: string
+                    description: Текущий статус обработки сообщения в брокере.
+                    example: "ACCEPTED_FOR_ANALYSIS"
+        '400':
+          description: Ошибка валидации. Неверный формат данных или отсутствует обязательное поле.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Неавторизованный запрос. Не передан или не валиден JWT-токен.
+        '500':
+          description: Внутренняя ошибка сервера Risk Engine при постановке задачи в очередь.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /risks/status:
+    get:
+      summary: Получение текущего уровня финансовой устойчивости компании
+      description: Возвращает агрегированный статус финансового здоровья на основе актуальных коэффициентов ликвидности и количества активных алертов. Используется фронтенд-дашбордами.
+      operationId: getRiskStatus
+      responses:
+        '200':
+          description: Успешный запрос агрегированного статуса.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskStatusResponse'
+        '401':
+          description: Неавторизованный запрос.
+        '500':
+          description: Ошибка СУБД или расчетного модуля при агрегации метрик.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    TransactionPayload:
+      type: object
+      required:
+        - account_id
+        - direction
+        - amount
+        - currency
+        - value_date
+      properties:
+        account_id:
+          type: string
+          format: uuid
+          description: ID расчетного счета из сущности Accounts, по которому проводится операция.
+          example: "e3b0c442-98fc-11ee-b9d1-0242ac120002"
+        direction:
+          type: string
+          enum: [IN, OUT]
+          description: Направление движения средств. IN — приход (поступление), OUT — расход (списание).
+          example: "OUT"
+        amount:
+          type: number
+          format: float
+          description: Сумма транзакции в указанной валюте.
+          example: 1550000.00
+        currency:
+          type: string
+          description: Трехзначный код валюты согласно ISO 4217.
+          example: "RUB"
+        counterparty_inn:
+          type: string
+          description: ИНН контрагента (10 цифр для ЮЛ, 12 для ФЛ).
+          example: "7707083893"
+        purpose:
+          type: string
+          description: Текстовое назначение платежа из платежного поручения.
+          example: "Оплата поставки серверного оборудования по договору №45-Ф"
+        value_date:
+          type: string
+          format: date-time
+          description: Дата и время фактического или планируемого проведения платежа (UTC).
+          example: "2026-11-02T15:30:00Z"
+
+    RiskStatusResponse:
+      type: object
+      required:
+        - company_status
+        - updated_at
+        - metrics
+        - active_alerts_count
+      properties:
+        company_status:
+          type: string
+          enum: [STABLE, WARNING, CRITICAL]
+          description: |
+            Общий статус финансовой устойчивости компании:
+            * `STABLE` (Зеленая зона) — все лимиты в норме.
+            * `WARNING` (Желтая зона) — есть незначительные нарушения или риск кассового разрыва на горизонте 30 дней.
+            * `CRITICAL` (Красная зона) — критическое падение ликвидности, зафиксирован кассовый разрыв.
+          example: "WARNING"
+        updated_at:
+          type: string
+          format: date-time
+          description: Время последнего пересчета агрегированного статуса (UTC).
+          example: "2026-11-02T22:00:00Z"
+        metrics:
+          type: object
+          description: Набор ключевых рассчитанных финансовых коэффициентов.
+          properties:
+            absolute_liquidity:
+              type: number
+              description: Коэффициент абсолютной ликвидности (Норматив > 0.2).
+              example: 0.18
+            current_liquidity:
+              type: number
+              description: Коэффициент текущей ликвидности (Норматив > 1.5 - 2.0).
+              example: 1.45
+        active_alerts_count:
+          type: integer
+          description: Количество неразрешенных (активных) системных алертов в таблице SystemAlerts.
+          example: 2
+
+    ErrorResponse:
+      type: object
+      required:
+        - error_code
+        - message
+        - timestamp
+      properties:
+        error_code:
+          type: string
+          description: Внутренний строковый код ошибки для фронтенда или логов.
+          example: "VALIDATION_FAILED"
+        message:
+          type: string
+          description: Понятное человеку описание причины ошибки.
+          example: "Поле 'amount' не может быть отрицательным."
+        timestamp:
+          type: string
+          format: date-time
+          description: Время возникновения ошибки (UTC).
+          example: "2026-11-02T22:05:00Z"
